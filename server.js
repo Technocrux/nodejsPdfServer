@@ -436,9 +436,17 @@ app.get('/queue-view', (req, res) => {
         }
         
         function escapeHtml(text) {
+            if (text == null) return '';
             const div = document.createElement('div');
-            div.textContent = text;
+            div.textContent = String(text);
             return div.innerHTML;
+        }
+        
+        function sanitizeCssClass(text) {
+            // Only allow known states for CSS class names
+            const validStates = ['waiting', 'running', 'executed'];
+            const normalized = String(text).toLowerCase();
+            return validStates.includes(normalized) ? normalized : 'unknown';
         }
         
         function updateQueue() {
@@ -470,9 +478,9 @@ app.get('/queue-view', (req, res) => {
                         } else {
                             jobsList.innerHTML = jobs.map(job => \`
                                 <div class="job">
-                                    <div class="job-id">#\${escapeHtml(String(job.id))}</div>
+                                    <div class="job-id">#\${escapeHtml(job.id)}</div>
                                     <div class="job-url" title="\${escapeHtml(job.url)}">\${escapeHtml(job.url)}</div>
-                                    <div class="job-state state-\${escapeHtml(job.state.toLowerCase())}">\${escapeHtml(job.state)}</div>
+                                    <div class="job-state state-\${sanitizeCssClass(job.state)}">\${escapeHtml(job.state)}</div>
                                     <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.requestedAt))}</div>
                                     <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.startedAt))}</div>
                                     <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.finishedAt))}</div>
