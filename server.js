@@ -44,8 +44,8 @@ async function processNextJob() {
         .get('Waiting');
 
     if (!job) {
-        // No jobs waiting, check again later
-        setTimeout(processNextJob, 1000);
+        // No jobs waiting, check again after a short delay
+        setTimeout(processNextJob, 5000);
         return;
     }
 
@@ -435,6 +435,12 @@ app.get('/queue-view', (req, res) => {
             return date.toLocaleString();
         }
         
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
         function updateQueue() {
             fetch('/queue')
                 .then(response => response.json())
@@ -464,12 +470,12 @@ app.get('/queue-view', (req, res) => {
                         } else {
                             jobsList.innerHTML = jobs.map(job => \`
                                 <div class="job">
-                                    <div class="job-id">#\${job.id}</div>
-                                    <div class="job-url" title="\${job.url}">\${job.url}</div>
-                                    <div class="job-state state-\${job.state.toLowerCase()}">\${job.state}</div>
-                                    <div class="job-timestamp">\${formatTimestamp(job.requestedAt)}</div>
-                                    <div class="job-timestamp">\${formatTimestamp(job.startedAt)}</div>
-                                    <div class="job-timestamp">\${formatTimestamp(job.finishedAt)}</div>
+                                    <div class="job-id">#\${escapeHtml(String(job.id))}</div>
+                                    <div class="job-url" title="\${escapeHtml(job.url)}">\${escapeHtml(job.url)}</div>
+                                    <div class="job-state state-\${escapeHtml(job.state.toLowerCase())}">\${escapeHtml(job.state)}</div>
+                                    <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.requestedAt))}</div>
+                                    <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.startedAt))}</div>
+                                    <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.finishedAt))}</div>
                                 </div>
                             \`).join('');
                         }
