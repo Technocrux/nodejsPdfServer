@@ -3,6 +3,7 @@ const puppeteer = require('puppeteer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const CHROME_PATH = process.env.CHROME_EXECUTABLE_PATH || '/usr/bin/google-chrome';
 
 // Middleware to parse JSON bodies
 app.use(express.json());
@@ -43,7 +44,7 @@ app.post('/runPdf', async (req, res) => {
         // Launch Puppeteer browser
         browser = await puppeteer.launch({
             headless: true,
-            executablePath: '/usr/bin/google-chrome',
+            executablePath: CHROME_PATH,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
