@@ -3,6 +3,7 @@ const puppeteer = require('puppeteer');
 const Database = require('better-sqlite3');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,11 +17,21 @@ const FALLBACK_WAIT_TIME = 120000; // 2 minutes
 const MAX_VIEWPORT_WIDTH = 10000; // Maximum viewport width in pixels
 const MAX_VIEWPORT_HEIGHT = 10000; // Maximum viewport height in pixels
 
+// Ensure download directory exists
+try {
+    if (!fs.existsSync(DOWNLOAD_PATH)) {
+        fs.mkdirSync(DOWNLOAD_PATH, { recursive: true });
+        console.log(`[Init] Created download directory: ${DOWNLOAD_PATH}`);
+    }
+} catch (err) {
+    console.error(`[Init] Failed to create download directory: ${err.message}`);
+}
+
 // Initialize SQLite database
 const dbPath = path.join(__dirname, 'jobs.db');
 const db = new Database(dbPath);
 
-// Create jobs table if it doesn't exist (without new columns for backward compatibility)
+// Create jobs table with base schema (columns will be added via migration below)
 db.exec(`
     CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,7 +43,8 @@ db.exec(`
     )
 `);
 
-// Migration: Add error and success columns if they don't exist (for existing databases and new installations)
+// Database migration: Add error and success columns for enhanced tracking
+// This migration works for both new installations and existing databases
 try {
     const tableInfo = db.prepare("PRAGMA table_info(jobs)").all();
     const columnNames = tableInfo.map(col => col.name);
@@ -49,8 +61,10 @@ try {
     
     console.log('[DB] Database schema is up to date');
 } catch (migrationError) {
-    console.error('[DB] Migration failed:', migrationError.message);
-    console.error('[DB] The application may not function correctly without the required columns');
+    console.error('[DB] CRITICAL: Database migration failed:', migrationError.message);
+    console.error('[DB] The application requires error and success columns to function correctly');
+    console.error('[DB] Please ensure the database is not corrupted and the application has write permissions');
+    process.exit(1);
 }
 
 // Middleware
