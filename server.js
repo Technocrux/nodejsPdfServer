@@ -22,9 +22,14 @@ try {
     if (!fs.existsSync(DOWNLOAD_PATH)) {
         fs.mkdirSync(DOWNLOAD_PATH, { recursive: true });
         console.log(`[Init] Created download directory: ${DOWNLOAD_PATH}`);
+    } else {
+        console.log(`[Init] Download directory exists: ${DOWNLOAD_PATH}`);
     }
 } catch (err) {
-    console.error(`[Init] Failed to create download directory: ${err.message}`);
+    console.error(`[Init] CRITICAL: Failed to create download directory: ${err.message}`);
+    console.error(`[Init] Downloads will not work without a valid directory`);
+    console.error(`[Init] Please ensure the path is writable or set DOWNLOAD_PATH environment variable`);
+    process.exit(1);
 }
 
 // Initialize SQLite database
@@ -63,7 +68,10 @@ try {
 } catch (migrationError) {
     console.error('[DB] CRITICAL: Database migration failed:', migrationError.message);
     console.error('[DB] The application requires error and success columns to function correctly');
-    console.error('[DB] Please ensure the database is not corrupted and the application has write permissions');
+    console.error('[DB] Recovery options:');
+    console.error('[DB]   1. Delete jobs.db and restart (WARNING: all job history will be lost)');
+    console.error('[DB]   2. Manually add columns: ALTER TABLE jobs ADD COLUMN error TEXT; ALTER TABLE jobs ADD COLUMN success INTEGER DEFAULT 0;');
+    console.error('[DB]   3. Check database file permissions and ensure it is not corrupted');
     process.exit(1);
 }
 
@@ -251,10 +259,10 @@ async function processNextJob() {
             browser = null;
         }
 
-        // Update job state to Executed with success flag
+        // Update job state to Executed with success flag and null error
         const finishedAt = new Date().toISOString();
-        db.prepare('UPDATE jobs SET state = ?, finishedAt = ?, success = ? WHERE id = ?')
-            .run('Executed', finishedAt, 1, jobId);
+        db.prepare('UPDATE jobs SET state = ?, finishedAt = ?, success = ?, error = ? WHERE id = ?')
+            .run('Executed', finishedAt, 1, null, jobId);
 
     } catch (error) {
         console.error(`[Worker] Error processing job ${jobId}:`, error);
