@@ -147,8 +147,9 @@ async function processNextJob() {
                     };
                 });
                 
-                // Validate dimensions are positive numbers
-                if (dimensions.width > 0 && dimensions.height > 0) {
+                // Validate dimensions are positive finite numbers
+                if (Number.isFinite(dimensions.width) && dimensions.width > 0 && 
+                    Number.isFinite(dimensions.height) && dimensions.height > 0) {
                     // Apply reasonable limits to prevent excessive memory usage
                     const viewportWidth = Math.min(dimensions.width, MAX_VIEWPORT_WIDTH);
                     const viewportHeight = Math.min(dimensions.height, MAX_VIEWPORT_HEIGHT);
