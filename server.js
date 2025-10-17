@@ -147,15 +147,20 @@ async function processNextJob() {
                     };
                 });
                 
-                // Apply reasonable limits to prevent excessive memory usage
-                const viewportWidth = Math.min(dimensions.width, MAX_VIEWPORT_WIDTH);
-                const viewportHeight = Math.min(dimensions.height, MAX_VIEWPORT_HEIGHT);
-                
-                console.log(`[Worker] Adjusting viewport to full page: ${viewportWidth}x${viewportHeight}`);
-                await page.setViewport({
-                    width: viewportWidth,
-                    height: viewportHeight
-                });
+                // Validate dimensions are positive numbers
+                if (dimensions.width > 0 && dimensions.height > 0) {
+                    // Apply reasonable limits to prevent excessive memory usage
+                    const viewportWidth = Math.min(dimensions.width, MAX_VIEWPORT_WIDTH);
+                    const viewportHeight = Math.min(dimensions.height, MAX_VIEWPORT_HEIGHT);
+                    
+                    console.log(`[Worker] Adjusting viewport to full page: ${viewportWidth}x${viewportHeight}`);
+                    await page.setViewport({
+                        width: viewportWidth,
+                        height: viewportHeight
+                    });
+                } else {
+                    console.warn('[Worker] Invalid page dimensions, keeping default viewport');
+                }
             } catch (viewportError) {
                 console.warn('[Worker] Could not adjust viewport:', viewportError.message);
             }
