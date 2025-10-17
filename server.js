@@ -8,6 +8,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const CHROME_PATH = process.env.CHROME_EXECUTABLE_PATH || '/usr/bin/google-chrome';
 
+// Puppeteer timeout and wait configurations (in milliseconds)
+const PAGE_GOTO_TIMEOUT = 900000; // 15 minutes
+const WAIT_AFTER_NETWORKIDLE = 180000; // 3 minutes
+const FALLBACK_WAIT_TIME = 120000; // 2 minutes
+const MAX_VIEWPORT_WIDTH = 10000; // Maximum viewport width in pixels
+const MAX_VIEWPORT_HEIGHT = 10000; // Maximum viewport height in pixels
+
 // Initialize SQLite database
 const dbPath = path.join(__dirname, 'jobs.db');
 const db = new Database(dbPath);
@@ -77,32 +84,98 @@ async function processNextJob() {
 
         const page = await browser.newPage();
 
-        // Set a reasonable viewport
+        // Set a reasonable viewport (will be adjusted dynamically later)
         await page.setViewport({
             width: 1280,
             height: 720
         });
 
+        // Setup dialog handler for popup auto-clicking
+        page.on('dialog', async dialog => {
+            console.log(`[Worker] Dialog detected: ${dialog.type()} - ${dialog.message()}`);
+            await dialog.accept();
+            console.log('[Worker] Dialog auto-accepted');
+        });
+
+        // Setup page close event listener
+        let pageClosedByScript = false;
+        page.on('close', () => {
+            console.log('[Worker] Page closed by script');
+            pageClosedByScript = true;
+        });
+
         console.log(`[Worker] Navigating to URL: ${url}`);
 
-        // Navigate to the URL and wait for network to be idle
+        // Navigate to the URL and wait for network to be idle (15 minutes timeout)
         await page.goto(url, {
             waitUntil: 'networkidle0',
-            timeout: 60000
+            timeout: PAGE_GOTO_TIMEOUT
         });
 
         console.log('[Worker] Page loaded, waiting for any async operations...');
 
-        // Wait a bit more to ensure any async operations complete
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Wait for processing after networkidle0
+        await new Promise(resolve => setTimeout(resolve, WAIT_AFTER_NETWORKIDLE));
+
+        // If page hasn't closed yet, wait additional time as fallback
+        if (!pageClosedByScript && !page.isClosed()) {
+            console.log('[Worker] Page still open, waiting additional time...');
+            await new Promise(resolve => setTimeout(resolve, FALLBACK_WAIT_TIME));
+        }
+
+        // Update viewport to match page content dimensions for full-page rendering
+        if (!page.isClosed()) {
+            try {
+                const dimensions = await page.evaluate(() => {
+                    return {
+                        width: Math.max(
+                            document.documentElement.scrollWidth,
+                            document.body.scrollWidth,
+                            document.documentElement.offsetWidth,
+                            document.body.offsetWidth,
+                            document.documentElement.clientWidth,
+                            document.body.clientWidth
+                        ),
+                        height: Math.max(
+                            document.documentElement.scrollHeight,
+                            document.body.scrollHeight,
+                            document.documentElement.offsetHeight,
+                            document.body.offsetHeight,
+                            document.documentElement.clientHeight,
+                            document.body.clientHeight
+                        )
+                    };
+                });
+                
+                // Validate dimensions are positive finite numbers
+                if (Number.isFinite(dimensions.width) && dimensions.width > 0 && 
+                    Number.isFinite(dimensions.height) && dimensions.height > 0) {
+                    // Apply reasonable limits to prevent excessive memory usage
+                    const viewportWidth = Math.min(dimensions.width, MAX_VIEWPORT_WIDTH);
+                    const viewportHeight = Math.min(dimensions.height, MAX_VIEWPORT_HEIGHT);
+                    
+                    console.log(`[Worker] Adjusting viewport to full page: ${viewportWidth}x${viewportHeight}`);
+                    await page.setViewport({
+                        width: viewportWidth,
+                        height: viewportHeight
+                    });
+                } else {
+                    console.warn('[Worker] Invalid page dimensions, keeping default viewport');
+                }
+            } catch (viewportError) {
+                console.warn('[Worker] Could not adjust viewport:', viewportError.message);
+            }
+        }
 
         console.log(`[Worker] Job ${jobId} completed successfully`);
 
-        // Close browser
-        await browser.close();
-        browser = null;
+        // Close browser if it's still open
+        if (browser) {
+            await browser.close();
+            browser = null;
+        }
 
-        // Update job state to Executed
+        // Update job state to Executed only after all operations are complete
         const finishedAt = new Date().toISOString();
         db.prepare('UPDATE jobs SET state = ?, finishedAt = ? WHERE id = ?')
             .run('Executed', finishedAt, jobId);
