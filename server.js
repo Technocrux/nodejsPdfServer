@@ -134,20 +134,25 @@ async function processNextJob() {
         console.log(`[Worker] Navigating to URL: ${url}`);
 
         // Navigate to the URL and wait for network to be idle (15 minutes timeout)
+        const navigationStart = Date.now();
         await page.goto(url, {
             waitUntil: 'networkidle0',
             timeout: PAGE_GOTO_TIMEOUT
         });
-
-        console.log('[Worker] Page loaded, waiting for any async operations...');
+        const navigationTime = ((Date.now() - navigationStart) / 1000).toFixed(2);
+        console.log(`[Worker] Page loaded in ${navigationTime}s, waiting for any async operations...`);
 
         // Wait for processing after networkidle0
+        const waitStart = Date.now();
         await new Promise(resolve => setTimeout(resolve, WAIT_AFTER_NETWORKIDLE));
+        console.log(`[Worker] Waited ${((Date.now() - waitStart) / 1000).toFixed(2)}s after network idle`);
 
         // If page hasn't closed yet, wait additional time as fallback
         if (!pageClosedByScript && !page.isClosed()) {
             console.log('[Worker] Page still open, waiting additional time...');
+            const fallbackStart = Date.now();
             await new Promise(resolve => setTimeout(resolve, FALLBACK_WAIT_TIME));
+            console.log(`[Worker] Waited additional ${((Date.now() - fallbackStart) / 1000).toFixed(2)}s`);
         }
 
         // Update viewport to match page content dimensions for full-page rendering
@@ -715,6 +720,7 @@ app.get('/', (req, res) => {
         endpoints: {
             'POST /runPdf': 'Add a URL to the job queue. Body: { "url": "http://example.com" }',
             'GET /queue': 'Get all jobs with their states and timestamps',
+            'GET /job/:id': 'Get detailed information about a specific job including errors',
             'GET /queue-view': 'View a visual representation of the job queue (HTML)',
             'GET /health': 'Health check endpoint'
         }
