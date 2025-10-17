@@ -33,6 +33,24 @@ db.exec(`
     )
 `);
 
+// Migration: Add error and success columns if they don't exist (for existing databases)
+try {
+    const tableInfo = db.prepare("PRAGMA table_info(jobs)").all();
+    const columnNames = tableInfo.map(col => col.name);
+    
+    if (!columnNames.includes('error')) {
+        console.log('[DB] Adding error column to jobs table...');
+        db.exec('ALTER TABLE jobs ADD COLUMN error TEXT');
+    }
+    
+    if (!columnNames.includes('success')) {
+        console.log('[DB] Adding success column to jobs table...');
+        db.exec('ALTER TABLE jobs ADD COLUMN success INTEGER DEFAULT 0');
+    }
+} catch (migrationError) {
+    console.warn('[DB] Migration check failed:', migrationError.message);
+}
+
 // Middleware
 app.use(cors()); // Enable CORS for all endpoints
 app.use(express.json()); // Parse JSON bodies
@@ -86,6 +104,14 @@ async function processNextJob() {
 
         const page = await browser.newPage();
 
+        // Enable download behavior
+        const client = await page.target().createCDPSession();
+        await client.send('Page.setDownloadBehavior', {
+            behavior: 'allow',
+            downloadPath: '/tmp'
+        });
+        console.log('[Worker] Enabled download behavior');
+
         // Set a reasonable viewport (will be adjusted dynamically later)
         await page.setViewport({
             width: 1280,
@@ -93,12 +119,14 @@ async function processNextJob() {
         });
 
         // Grant permissions for downloads and other features
-        const context = browser.defaultBrowserContext();
-        await context.overridePermissions(new URL(url).origin, [
-            'downloads',
-            'downloads-unsafe'
-        ]);
-        console.log(`[Worker] Granted download permissions for ${new URL(url).origin}`);
+        try {
+            const context = browser.defaultBrowserContext();
+            const urlOrigin = new URL(url).origin;
+            await context.overridePermissions(urlOrigin, ['notifications']);
+            console.log(`[Worker] Granted permissions for ${urlOrigin}`);
+        } catch (permError) {
+            console.warn(`[Worker] Could not grant permissions: ${permError.message}`);
+        }
 
         // Setup dialog handler for popup auto-clicking
         page.on('dialog', async dialog => {
