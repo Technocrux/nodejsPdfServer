@@ -1,1 +1,4 @@
-
+version: 1
+agent:
+  network:
+    allow_all: true
