@@ -8,6 +8,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const CHROME_PATH = process.env.CHROME_EXECUTABLE_PATH || '/usr/bin/google-chrome';
 
+// Puppeteer timeout and wait configurations (in milliseconds)
+const PAGE_GOTO_TIMEOUT = 900000; // 15 minutes
+const WAIT_AFTER_NETWORKIDLE = 180000; // 3 minutes
+const FALLBACK_WAIT_TIME = 120000; // 2 minutes
+const MAX_VIEWPORT_WIDTH = 10000; // Maximum viewport width in pixels
+const MAX_VIEWPORT_HEIGHT = 10000; // Maximum viewport height in pixels
+
 // Initialize SQLite database
 const dbPath = path.join(__dirname, 'jobs.db');
 const db = new Database(dbPath);
@@ -102,18 +109,18 @@ async function processNextJob() {
         // Navigate to the URL and wait for network to be idle (15 minutes timeout)
         await page.goto(url, {
             waitUntil: 'networkidle0',
-            timeout: 900000 // 15 minutes
+            timeout: PAGE_GOTO_TIMEOUT
         });
 
         console.log('[Worker] Page loaded, waiting for any async operations...');
 
-        // Wait 3 minutes for processing after networkidle0
-        await new Promise(resolve => setTimeout(resolve, 180000)); // 3 minutes
+        // Wait for processing after networkidle0
+        await new Promise(resolve => setTimeout(resolve, WAIT_AFTER_NETWORKIDLE));
 
-        // If page hasn't closed yet, wait an additional 2 minutes as fallback
+        // If page hasn't closed yet, wait additional time as fallback
         if (!pageClosedByScript && !page.isClosed()) {
-            console.log('[Worker] Page still open, waiting additional 2 minutes...');
-            await new Promise(resolve => setTimeout(resolve, 120000)); // 2 minutes
+            console.log('[Worker] Page still open, waiting additional time...');
+            await new Promise(resolve => setTimeout(resolve, FALLBACK_WAIT_TIME));
         }
 
         // Update viewport to match page content dimensions for full-page rendering
@@ -140,10 +147,14 @@ async function processNextJob() {
                     };
                 });
                 
-                console.log(`[Worker] Adjusting viewport to full page: ${dimensions.width}x${dimensions.height}`);
+                // Apply reasonable limits to prevent excessive memory usage
+                const viewportWidth = Math.min(dimensions.width, MAX_VIEWPORT_WIDTH);
+                const viewportHeight = Math.min(dimensions.height, MAX_VIEWPORT_HEIGHT);
+                
+                console.log(`[Worker] Adjusting viewport to full page: ${viewportWidth}x${viewportHeight}`);
                 await page.setViewport({
-                    width: dimensions.width,
-                    height: dimensions.height
+                    width: viewportWidth,
+                    height: viewportHeight
                 });
             } catch (viewportError) {
                 console.warn('[Worker] Could not adjust viewport:', viewportError.message);
@@ -152,12 +163,8 @@ async function processNextJob() {
 
         console.log(`[Worker] Job ${jobId} completed successfully`);
 
-        // Close browser if not already closed
-        if (!page.isClosed() && browser) {
-            await browser.close();
-            browser = null;
-        } else if (browser) {
-            // Page was closed but browser still open
+        // Close browser if it's still open
+        if (browser) {
             await browser.close();
             browser = null;
         }
