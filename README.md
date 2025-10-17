@@ -242,6 +242,7 @@ The server includes a background worker that:
 
 - `PORT`: Server port (default: 3000)
 - `CHROME_EXECUTABLE_PATH`: Path to Chrome/Chromium executable (default: /usr/bin/google-chrome)
+- `DOWNLOAD_PATH`: Directory for Puppeteer downloads (default: /tmp/puppeteer-downloads)
 
 ## Use Case
 

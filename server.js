@@ -7,6 +7,7 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const CHROME_PATH = process.env.CHROME_EXECUTABLE_PATH || '/usr/bin/google-chrome';
+const DOWNLOAD_PATH = process.env.DOWNLOAD_PATH || '/tmp/puppeteer-downloads';
 
 // Puppeteer timeout and wait configurations (in milliseconds)
 const PAGE_GOTO_TIMEOUT = 900000; // 15 minutes
@@ -19,7 +20,7 @@ const MAX_VIEWPORT_HEIGHT = 10000; // Maximum viewport height in pixels
 const dbPath = path.join(__dirname, 'jobs.db');
 const db = new Database(dbPath);
 
-// Create jobs table if it doesn't exist
+// Create jobs table if it doesn't exist (without new columns for backward compatibility)
 db.exec(`
     CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,13 +28,11 @@ db.exec(`
         state TEXT NOT NULL DEFAULT 'Waiting',
         requestedAt TEXT NOT NULL,
         startedAt TEXT,
-        finishedAt TEXT,
-        error TEXT,
-        success INTEGER DEFAULT 0
+        finishedAt TEXT
     )
 `);
 
-// Migration: Add error and success columns if they don't exist (for existing databases)
+// Migration: Add error and success columns if they don't exist (for existing databases and new installations)
 try {
     const tableInfo = db.prepare("PRAGMA table_info(jobs)").all();
     const columnNames = tableInfo.map(col => col.name);
@@ -47,8 +46,11 @@ try {
         console.log('[DB] Adding success column to jobs table...');
         db.exec('ALTER TABLE jobs ADD COLUMN success INTEGER DEFAULT 0');
     }
+    
+    console.log('[DB] Database schema is up to date');
 } catch (migrationError) {
-    console.warn('[DB] Migration check failed:', migrationError.message);
+    console.error('[DB] Migration failed:', migrationError.message);
+    console.error('[DB] The application may not function correctly without the required columns');
 }
 
 // Middleware
@@ -108,9 +110,9 @@ async function processNextJob() {
         const client = await page.target().createCDPSession();
         await client.send('Page.setDownloadBehavior', {
             behavior: 'allow',
-            downloadPath: '/tmp'
+            downloadPath: DOWNLOAD_PATH
         });
-        console.log('[Worker] Enabled download behavior');
+        console.log(`[Worker] Enabled download behavior (path: ${DOWNLOAD_PATH})`);
 
         // Set a reasonable viewport (will be adjusted dynamically later)
         await page.setViewport({
@@ -118,7 +120,7 @@ async function processNextJob() {
             height: 720
         });
 
-        // Grant permissions for downloads and other features
+        // Grant permissions for notifications and other features
         try {
             const context = browser.defaultBrowserContext();
             const urlOrigin = new URL(url).origin;
