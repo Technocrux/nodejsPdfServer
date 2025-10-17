@@ -28,6 +28,18 @@ Jobs in the queue go through the following states:
 - **Running**: Job is currently being processed by the background worker
 - **Executed**: Job has completed processing (successfully or with errors)
 
+Each job also has a `success` field (0 or 1) and an optional `error` field that contains detailed error information if the job failed.
+
+## Error Tracking
+
+The server now provides comprehensive error tracking:
+
+- All jobs have a `success` flag (1 for success, 0 for failure)
+- Failed jobs include detailed error messages and stack traces in the `error` field
+- The queue viewer displays success/failure status with visual indicators
+- Page console logs, errors, and failed requests are logged to the server console
+- Use the `/job/:id` endpoint to get detailed information about a specific job including errors
+
 ## Database
 
 The application uses SQLite for job persistence. The database file (`jobs.db`) is created automatically in the application directory. This file stores:
@@ -93,7 +105,7 @@ curl -X POST http://localhost:3000/runPdf \
 
 #### GET /queue
 
-Retrieve all jobs with their current states and timestamps. This endpoint returns the complete job history.
+Retrieve all jobs with their current states and timestamps. This endpoint returns the complete job history including success/failure information.
 
 **Request:**
 
@@ -112,15 +124,19 @@ curl http://localhost:3000/queue
       "state": "Executed",
       "requestedAt": "2025-10-16T13:00:00.000Z",
       "startedAt": "2025-10-16T13:00:01.000Z",
-      "finishedAt": "2025-10-16T13:00:15.000Z"
+      "finishedAt": "2025-10-16T13:00:15.000Z",
+      "error": null,
+      "success": 1
     },
     {
       "id": 2,
-      "url": "https://google.com",
-      "state": "Running",
+      "url": "https://invalid-url-test.com",
+      "state": "Executed",
       "requestedAt": "2025-10-16T13:01:00.000Z",
       "startedAt": "2025-10-16T13:01:05.000Z",
-      "finishedAt": null
+      "finishedAt": "2025-10-16T13:01:20.000Z",
+      "error": "net::ERR_NAME_NOT_RESOLVED...",
+      "success": 0
     },
     {
       "id": 3,
@@ -128,9 +144,46 @@ curl http://localhost:3000/queue
       "state": "Waiting",
       "requestedAt": "2025-10-16T13:02:00.000Z",
       "startedAt": null,
-      "finishedAt": null
+      "finishedAt": null,
+      "error": null,
+      "success": 0
     }
   ]
+}
+```
+
+#### GET /job/:id
+
+Get detailed information about a specific job, including error messages if the job failed.
+
+**Request:**
+
+```bash
+curl http://localhost:3000/job/1
+```
+
+**Success Response:**
+```json
+{
+  "success": true,
+  "job": {
+    "id": 1,
+    "url": "https://example.com",
+    "state": "Executed",
+    "requestedAt": "2025-10-16T13:00:00.000Z",
+    "startedAt": "2025-10-16T13:00:01.000Z",
+    "finishedAt": "2025-10-16T13:00:15.000Z",
+    "error": null,
+    "success": 1
+  }
+}
+```
+
+**Error Response (job not found):**
+```json
+{
+  "success": false,
+  "error": "Job not found"
 }
 ```
 
@@ -139,6 +192,8 @@ curl http://localhost:3000/queue
 Serves an HTML page that visualizes the job queue with:
 - Real-time statistics (total, waiting, running, executed jobs)
 - Color-coded job states
+- Success/failure indicators for completed jobs
+- Error details on hover for failed jobs
 - Auto-refresh every 2 seconds
 - Responsive design
 
@@ -167,6 +222,7 @@ Returns API information and available endpoints.
   "endpoints": {
     "POST /runPdf": "Add a URL to the job queue. Body: { \"url\": \"http://example.com\" }",
     "GET /queue": "Get all jobs with their states and timestamps",
+    "GET /job/:id": "Get detailed information about a specific job including errors",
     "GET /queue-view": "View a visual representation of the job queue (HTML)",
     "GET /health": "Health check endpoint"
   }
@@ -186,6 +242,7 @@ The server includes a background worker that:
 
 - `PORT`: Server port (default: 3000)
 - `CHROME_EXECUTABLE_PATH`: Path to Chrome/Chromium executable (default: /usr/bin/google-chrome)
+- `DOWNLOAD_PATH`: Directory for Puppeteer downloads (default: /tmp/puppeteer-downloads)
 
 ## Use Case
 

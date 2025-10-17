@@ -3,10 +3,12 @@ const puppeteer = require('puppeteer');
 const Database = require('better-sqlite3');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const CHROME_PATH = process.env.CHROME_EXECUTABLE_PATH || '/usr/bin/google-chrome';
+const DOWNLOAD_PATH = process.env.DOWNLOAD_PATH || '/tmp/puppeteer-downloads';
 
 // Puppeteer timeout and wait configurations (in milliseconds)
 const PAGE_GOTO_TIMEOUT = 900000; // 15 minutes
@@ -15,11 +17,26 @@ const FALLBACK_WAIT_TIME = 120000; // 2 minutes
 const MAX_VIEWPORT_WIDTH = 10000; // Maximum viewport width in pixels
 const MAX_VIEWPORT_HEIGHT = 10000; // Maximum viewport height in pixels
 
+// Ensure download directory exists
+try {
+    if (!fs.existsSync(DOWNLOAD_PATH)) {
+        fs.mkdirSync(DOWNLOAD_PATH, { recursive: true });
+        console.log(`[Init] Created download directory: ${DOWNLOAD_PATH}`);
+    } else {
+        console.log(`[Init] Download directory exists: ${DOWNLOAD_PATH}`);
+    }
+} catch (err) {
+    console.error(`[Init] CRITICAL: Failed to create download directory: ${err.message}`);
+    console.error(`[Init] Downloads will not work without a valid directory`);
+    console.error(`[Init] Please ensure the path is writable or set DOWNLOAD_PATH environment variable`);
+    process.exit(1);
+}
+
 // Initialize SQLite database
 const dbPath = path.join(__dirname, 'jobs.db');
 const db = new Database(dbPath);
 
-// Create jobs table if it doesn't exist
+// Create jobs table with base schema (columns will be added via migration below)
 db.exec(`
     CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,6 +47,33 @@ db.exec(`
         finishedAt TEXT
     )
 `);
+
+// Database migration: Add error and success columns for enhanced tracking
+// This migration works for both new installations and existing databases
+try {
+    const tableInfo = db.prepare("PRAGMA table_info(jobs)").all();
+    const columnNames = tableInfo.map(col => col.name);
+    
+    if (!columnNames.includes('error')) {
+        console.log('[DB] Adding error column to jobs table...');
+        db.exec('ALTER TABLE jobs ADD COLUMN error TEXT');
+    }
+    
+    if (!columnNames.includes('success')) {
+        console.log('[DB] Adding success column to jobs table...');
+        db.exec('ALTER TABLE jobs ADD COLUMN success INTEGER DEFAULT 0');
+    }
+    
+    console.log('[DB] Database schema is up to date');
+} catch (migrationError) {
+    console.error('[DB] CRITICAL: Database migration failed:', migrationError.message);
+    console.error('[DB] The application requires error and success columns to function correctly');
+    console.error('[DB] Recovery options:');
+    console.error('[DB]   1. Delete jobs.db and restart (WARNING: all job history will be lost)');
+    console.error('[DB]   2. Manually add columns: ALTER TABLE jobs ADD COLUMN error TEXT; ALTER TABLE jobs ADD COLUMN success INTEGER DEFAULT 0;');
+    console.error('[DB]   3. Check database file permissions and ensure it is not corrupted');
+    process.exit(1);
+}
 
 // Middleware
 app.use(cors()); // Enable CORS for all endpoints
@@ -84,17 +128,52 @@ async function processNextJob() {
 
         const page = await browser.newPage();
 
+        // Enable download behavior
+        const client = await page.target().createCDPSession();
+        await client.send('Page.setDownloadBehavior', {
+            behavior: 'allow',
+            downloadPath: DOWNLOAD_PATH
+        });
+        console.log(`[Worker] Enabled download behavior (path: ${DOWNLOAD_PATH})`);
+
         // Set a reasonable viewport (will be adjusted dynamically later)
         await page.setViewport({
             width: 1280,
             height: 720
         });
 
+        // Grant permissions for notifications and other features
+        try {
+            const context = browser.defaultBrowserContext();
+            const urlOrigin = new URL(url).origin;
+            await context.overridePermissions(urlOrigin, ['notifications']);
+            console.log(`[Worker] Granted permissions for ${urlOrigin}`);
+        } catch (permError) {
+            console.warn(`[Worker] Could not grant permissions: ${permError.message}`);
+        }
+
         // Setup dialog handler for popup auto-clicking
         page.on('dialog', async dialog => {
             console.log(`[Worker] Dialog detected: ${dialog.type()} - ${dialog.message()}`);
             await dialog.accept();
             console.log('[Worker] Dialog auto-accepted');
+        });
+
+        // Log console messages from the page
+        page.on('console', msg => {
+            const type = msg.type();
+            const text = msg.text();
+            console.log(`[Worker] Page console.${type}: ${text}`);
+        });
+
+        // Log page errors
+        page.on('pageerror', error => {
+            console.error(`[Worker] Page error: ${error.message}`);
+        });
+
+        // Log failed requests
+        page.on('requestfailed', request => {
+            console.error(`[Worker] Request failed: ${request.url()} - ${request.failure()?.errorText || 'unknown error'}`);
         });
 
         // Setup page close event listener
@@ -107,20 +186,25 @@ async function processNextJob() {
         console.log(`[Worker] Navigating to URL: ${url}`);
 
         // Navigate to the URL and wait for network to be idle (15 minutes timeout)
+        const navigationStart = Date.now();
         await page.goto(url, {
             waitUntil: 'networkidle0',
             timeout: PAGE_GOTO_TIMEOUT
         });
-
-        console.log('[Worker] Page loaded, waiting for any async operations...');
+        const navigationTime = ((Date.now() - navigationStart) / 1000).toFixed(2);
+        console.log(`[Worker] Page loaded in ${navigationTime}s, waiting for any async operations...`);
 
         // Wait for processing after networkidle0
+        const waitStart = Date.now();
         await new Promise(resolve => setTimeout(resolve, WAIT_AFTER_NETWORKIDLE));
+        console.log(`[Worker] Waited ${((Date.now() - waitStart) / 1000).toFixed(2)}s after network idle`);
 
         // If page hasn't closed yet, wait additional time as fallback
         if (!pageClosedByScript && !page.isClosed()) {
             console.log('[Worker] Page still open, waiting additional time...');
+            const fallbackStart = Date.now();
             await new Promise(resolve => setTimeout(resolve, FALLBACK_WAIT_TIME));
+            console.log(`[Worker] Waited additional ${((Date.now() - fallbackStart) / 1000).toFixed(2)}s`);
         }
 
         // Update viewport to match page content dimensions for full-page rendering
@@ -175,13 +259,14 @@ async function processNextJob() {
             browser = null;
         }
 
-        // Update job state to Executed only after all operations are complete
+        // Update job state to Executed with success flag and null error
         const finishedAt = new Date().toISOString();
-        db.prepare('UPDATE jobs SET state = ?, finishedAt = ? WHERE id = ?')
-            .run('Executed', finishedAt, jobId);
+        db.prepare('UPDATE jobs SET state = ?, finishedAt = ?, success = ?, error = ? WHERE id = ?')
+            .run('Executed', finishedAt, 1, null, jobId);
 
     } catch (error) {
         console.error(`[Worker] Error processing job ${jobId}:`, error);
+        console.error(`[Worker] Error stack:`, error.stack);
 
         // Close browser if it's still open
         if (browser) {
@@ -192,10 +277,11 @@ async function processNextJob() {
             }
         }
 
-        // Mark job as failed but keep it as Executed with error note
+        // Mark job as failed with error details
         const finishedAt = new Date().toISOString();
-        db.prepare('UPDATE jobs SET state = ?, finishedAt = ? WHERE id = ?')
-            .run('Executed', finishedAt, jobId);
+        const errorMessage = `${error.message}\n\nStack trace:\n${error.stack}`;
+        db.prepare('UPDATE jobs SET state = ?, finishedAt = ?, success = ?, error = ? WHERE id = ?')
+            .run('Executed', finishedAt, 0, errorMessage, jobId);
     } finally {
         isProcessing = false;
         // Process next job
@@ -286,6 +372,43 @@ app.get('/queue', (req, res) => {
 });
 
 /**
+ * GET /job/:id
+ * Returns details of a specific job including error information
+ */
+app.get('/job/:id', (req, res) => {
+    try {
+        const jobId = parseInt(req.params.id);
+        if (isNaN(jobId)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid job ID'
+            });
+        }
+        
+        const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+        
+        if (!job) {
+            return res.status(404).json({
+                success: false,
+                error: 'Job not found'
+            });
+        }
+        
+        res.json({
+            success: true,
+            job: job
+        });
+    } catch (error) {
+        console.error('Error fetching job:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch job',
+            details: error.message
+        });
+    }
+});
+
+/**
  * GET /queue-view
  * Returns an HTML page visualizing the queue
  */
@@ -362,7 +485,7 @@ app.get('/queue-view', (req, res) => {
             color: white;
             padding: 20px;
             display: grid;
-            grid-template-columns: 80px 1fr 120px 180px 180px 180px;
+            grid-template-columns: 80px 1fr 120px 120px 180px 180px 180px;
             gap: 15px;
             font-weight: bold;
             font-size: 0.9em;
@@ -371,7 +494,7 @@ app.get('/queue-view', (req, res) => {
         .job {
             padding: 20px;
             display: grid;
-            grid-template-columns: 80px 1fr 120px 180px 180px 180px;
+            grid-template-columns: 80px 1fr 120px 120px 180px 180px 180px;
             gap: 15px;
             border-bottom: 1px solid #e2e8f0;
             align-items: center;
@@ -413,6 +536,48 @@ app.get('/queue-view', (req, res) => {
         .state-executed {
             background-color: #d1fae5;
             color: #065f46;
+        }
+        .state-failed {
+            background-color: #fee2e2;
+            color: #991b1b;
+        }
+        .job-status {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+            text-align: center;
+            text-transform: uppercase;
+        }
+        .status-success {
+            background-color: #d1fae5;
+            color: #065f46;
+        }
+        .status-failed {
+            background-color: #fee2e2;
+            color: #991b1b;
+        }
+        .status-pending {
+            background-color: #f3f4f6;
+            color: #6b7280;
+        }
+        .error-icon {
+            cursor: pointer;
+            color: #dc2626;
+            font-size: 1.2em;
+        }
+        .error-tooltip {
+            display: none;
+            position: absolute;
+            background: #1f2937;
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.8em;
+            max-width: 300px;
+            z-index: 1000;
+            white-space: pre-wrap;
+            word-break: break-word;
         }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -486,6 +651,7 @@ app.get('/queue-view', (req, res) => {
                 <div>ID</div>
                 <div>URL</div>
                 <div>State</div>
+                <div>Result</div>
                 <div>Requested At</div>
                 <div>Started At</div>
                 <div>Finished At</div>
@@ -549,16 +715,31 @@ app.get('/queue-view', (req, res) => {
                                 </div>
                             \`;
                         } else {
-                            jobsList.innerHTML = jobs.map(job => \`
+                            jobsList.innerHTML = jobs.map(job => {
+                                let resultHtml = '';
+                                if (job.state === 'Executed') {
+                                    if (job.success === 1) {
+                                        resultHtml = '<div class="job-status status-success">✓ Success</div>';
+                                    } else {
+                                        const errorText = job.error ? job.error.substring(0, 100) + '...' : 'Unknown error';
+                                        resultHtml = \`<div class="job-status status-failed" title="\${escapeHtml(job.error || 'Unknown error')}">✗ Failed</div>\`;
+                                    }
+                                } else {
+                                    resultHtml = '<div class="job-status status-pending">-</div>';
+                                }
+                                
+                                return \`
                                 <div class="job">
                                     <div class="job-id">#\${escapeHtml(job.id)}</div>
                                     <div class="job-url" title="\${escapeHtml(job.url)}">\${escapeHtml(job.url)}</div>
                                     <div class="job-state state-\${sanitizeCssClass(job.state)}">\${escapeHtml(job.state)}</div>
+                                    <div>\${resultHtml}</div>
                                     <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.requestedAt))}</div>
                                     <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.startedAt))}</div>
                                     <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.finishedAt))}</div>
                                 </div>
-                            \`).join('');
+                            \`;
+                            }).join('');
                         }
                     }
                 })
@@ -591,6 +772,7 @@ app.get('/', (req, res) => {
         endpoints: {
             'POST /runPdf': 'Add a URL to the job queue. Body: { "url": "http://example.com" }',
             'GET /queue': 'Get all jobs with their states and timestamps',
+            'GET /job/:id': 'Get detailed information about a specific job including errors',
             'GET /queue-view': 'View a visual representation of the job queue (HTML)',
             'GET /health': 'Health check endpoint'
         }
