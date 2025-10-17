@@ -27,7 +27,9 @@ db.exec(`
         state TEXT NOT NULL DEFAULT 'Waiting',
         requestedAt TEXT NOT NULL,
         startedAt TEXT,
-        finishedAt TEXT
+        finishedAt TEXT,
+        error TEXT,
+        success INTEGER DEFAULT 0
     )
 `);
 
@@ -90,11 +92,36 @@ async function processNextJob() {
             height: 720
         });
 
+        // Grant permissions for downloads and other features
+        const context = browser.defaultBrowserContext();
+        await context.overridePermissions(new URL(url).origin, [
+            'downloads',
+            'downloads-unsafe'
+        ]);
+        console.log(`[Worker] Granted download permissions for ${new URL(url).origin}`);
+
         // Setup dialog handler for popup auto-clicking
         page.on('dialog', async dialog => {
             console.log(`[Worker] Dialog detected: ${dialog.type()} - ${dialog.message()}`);
             await dialog.accept();
             console.log('[Worker] Dialog auto-accepted');
+        });
+
+        // Log console messages from the page
+        page.on('console', msg => {
+            const type = msg.type();
+            const text = msg.text();
+            console.log(`[Worker] Page console.${type}: ${text}`);
+        });
+
+        // Log page errors
+        page.on('pageerror', error => {
+            console.error(`[Worker] Page error: ${error.message}`);
+        });
+
+        // Log failed requests
+        page.on('requestfailed', request => {
+            console.error(`[Worker] Request failed: ${request.url()} - ${request.failure()?.errorText || 'unknown error'}`);
         });
 
         // Setup page close event listener
@@ -175,13 +202,14 @@ async function processNextJob() {
             browser = null;
         }
 
-        // Update job state to Executed only after all operations are complete
+        // Update job state to Executed with success flag
         const finishedAt = new Date().toISOString();
-        db.prepare('UPDATE jobs SET state = ?, finishedAt = ? WHERE id = ?')
-            .run('Executed', finishedAt, jobId);
+        db.prepare('UPDATE jobs SET state = ?, finishedAt = ?, success = ? WHERE id = ?')
+            .run('Executed', finishedAt, 1, jobId);
 
     } catch (error) {
         console.error(`[Worker] Error processing job ${jobId}:`, error);
+        console.error(`[Worker] Error stack:`, error.stack);
 
         // Close browser if it's still open
         if (browser) {
@@ -192,10 +220,11 @@ async function processNextJob() {
             }
         }
 
-        // Mark job as failed but keep it as Executed with error note
+        // Mark job as failed with error details
         const finishedAt = new Date().toISOString();
-        db.prepare('UPDATE jobs SET state = ?, finishedAt = ? WHERE id = ?')
-            .run('Executed', finishedAt, jobId);
+        const errorMessage = `${error.message}\n\nStack trace:\n${error.stack}`;
+        db.prepare('UPDATE jobs SET state = ?, finishedAt = ?, success = ?, error = ? WHERE id = ?')
+            .run('Executed', finishedAt, 0, errorMessage, jobId);
     } finally {
         isProcessing = false;
         // Process next job
@@ -286,6 +315,43 @@ app.get('/queue', (req, res) => {
 });
 
 /**
+ * GET /job/:id
+ * Returns details of a specific job including error information
+ */
+app.get('/job/:id', (req, res) => {
+    try {
+        const jobId = parseInt(req.params.id);
+        if (isNaN(jobId)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid job ID'
+            });
+        }
+        
+        const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
+        
+        if (!job) {
+            return res.status(404).json({
+                success: false,
+                error: 'Job not found'
+            });
+        }
+        
+        res.json({
+            success: true,
+            job: job
+        });
+    } catch (error) {
+        console.error('Error fetching job:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch job',
+            details: error.message
+        });
+    }
+});
+
+/**
  * GET /queue-view
  * Returns an HTML page visualizing the queue
  */
@@ -362,7 +428,7 @@ app.get('/queue-view', (req, res) => {
             color: white;
             padding: 20px;
             display: grid;
-            grid-template-columns: 80px 1fr 120px 180px 180px 180px;
+            grid-template-columns: 80px 1fr 120px 120px 180px 180px 180px;
             gap: 15px;
             font-weight: bold;
             font-size: 0.9em;
@@ -371,7 +437,7 @@ app.get('/queue-view', (req, res) => {
         .job {
             padding: 20px;
             display: grid;
-            grid-template-columns: 80px 1fr 120px 180px 180px 180px;
+            grid-template-columns: 80px 1fr 120px 120px 180px 180px 180px;
             gap: 15px;
             border-bottom: 1px solid #e2e8f0;
             align-items: center;
@@ -413,6 +479,48 @@ app.get('/queue-view', (req, res) => {
         .state-executed {
             background-color: #d1fae5;
             color: #065f46;
+        }
+        .state-failed {
+            background-color: #fee2e2;
+            color: #991b1b;
+        }
+        .job-status {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+            text-align: center;
+            text-transform: uppercase;
+        }
+        .status-success {
+            background-color: #d1fae5;
+            color: #065f46;
+        }
+        .status-failed {
+            background-color: #fee2e2;
+            color: #991b1b;
+        }
+        .status-pending {
+            background-color: #f3f4f6;
+            color: #6b7280;
+        }
+        .error-icon {
+            cursor: pointer;
+            color: #dc2626;
+            font-size: 1.2em;
+        }
+        .error-tooltip {
+            display: none;
+            position: absolute;
+            background: #1f2937;
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.8em;
+            max-width: 300px;
+            z-index: 1000;
+            white-space: pre-wrap;
+            word-break: break-word;
         }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -486,6 +594,7 @@ app.get('/queue-view', (req, res) => {
                 <div>ID</div>
                 <div>URL</div>
                 <div>State</div>
+                <div>Result</div>
                 <div>Requested At</div>
                 <div>Started At</div>
                 <div>Finished At</div>
@@ -549,16 +658,31 @@ app.get('/queue-view', (req, res) => {
                                 </div>
                             \`;
                         } else {
-                            jobsList.innerHTML = jobs.map(job => \`
+                            jobsList.innerHTML = jobs.map(job => {
+                                let resultHtml = '';
+                                if (job.state === 'Executed') {
+                                    if (job.success === 1) {
+                                        resultHtml = '<div class="job-status status-success">✓ Success</div>';
+                                    } else {
+                                        const errorText = job.error ? job.error.substring(0, 100) + '...' : 'Unknown error';
+                                        resultHtml = \`<div class="job-status status-failed" title="\${escapeHtml(job.error || 'Unknown error')}">✗ Failed</div>\`;
+                                    }
+                                } else {
+                                    resultHtml = '<div class="job-status status-pending">-</div>';
+                                }
+                                
+                                return \`
                                 <div class="job">
                                     <div class="job-id">#\${escapeHtml(job.id)}</div>
                                     <div class="job-url" title="\${escapeHtml(job.url)}">\${escapeHtml(job.url)}</div>
                                     <div class="job-state state-\${sanitizeCssClass(job.state)}">\${escapeHtml(job.state)}</div>
+                                    <div>\${resultHtml}</div>
                                     <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.requestedAt))}</div>
                                     <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.startedAt))}</div>
                                     <div class="job-timestamp">\${escapeHtml(formatTimestamp(job.finishedAt))}</div>
                                 </div>
-                            \`).join('');
+                            \`;
+                            }).join('');
                         }
                     }
                 })
